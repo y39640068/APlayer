@@ -1,112 +1,123 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-APlayer 定时关闭「记忆功能」自动打补丁脚本
-
-做了什么：
-  1) 在 SleepTimer.kt 中：开始定时关闭时，自动把本次时长（秒）和「默认开启」标记写入配置；
-     用户主动取消定时时，清除「默认开启」标记。
-  2) 在 MusicService.kt 中：播放服务启动时，如果上次开启了定时关闭，
-     就自动按上次的时长重新开始倒计时（到点照常停止播放 / 退出）。
-
-用法（在仓库根目录执行）：
-    python3 tools/apply_memory_patch.py
-也可以手动指定仓库根目录：
-    python3 tools/apply_memory_patch.py /path/to/APlayer
+自动给 APlayer 打"定时关闭记忆"补丁：
+1. SleepTimer.kt: 开启定时时记住时长，取消时清除记忆
+2. MusicService.kt: App启动/服务创建时自动恢复上次的定时
 """
-
 import os
 import sys
+import shutil
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if len(sys.argv) > 1:
-    REPO_ROOT = os.path.abspath(sys.argv[1])
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-SLEEP_TIMER = os.path.join(
-    REPO_ROOT, "app/src/main/java/remix/myplayer/helper/SleepTimer.kt")
-MUSIC_SERVICE = os.path.join(
-    REPO_ROOT, "app/src/main/java/remix/myplayer/service/MusicService.kt")
-
-SLEEP_TIMER_PATCHES = [
-    (
-        "import remix.myplayer.util.ToastUtil",
-        "import remix.myplayer.util.ToastUtil\n"
-        "import remix.myplayer.util.SPUtil\n"
-        "import remix.myplayer.util.SPUtil.SETTING_KEY",
-    ),
-    (
-        "        instance = SleepTimer(duration, 1000)\n"
-        "        instance?.start()",
-        "        instance = SleepTimer(duration, 1000)\n"
-        "        instance?.start()\n"
-        "        // 记忆功能：保存本次时长(秒)并标记为默认开启\n"
-        "        SPUtil.putValue(context, SETTING_KEY.NAME, SETTING_KEY.TIMER_DEFAULT, true)\n"
-        "        SPUtil.putValue(\n"
-        "            context, SETTING_KEY.NAME, SETTING_KEY.TIMER_DURATION, (duration / 1000).toInt()\n"
-        "        )",
-    ),
-    (
-        "          } else {\n"
-        "            instance?.cancel()\n"
-        "          }\n"
-        "          instance = null",
-        "          } else {\n"
-        "            instance?.cancel()\n"
-        "            // 记忆功能：用户主动取消后，下次启动不再自动开启\n"
-        "            SPUtil.putValue(context, SETTING_KEY.NAME, SETTING_KEY.TIMER_DEFAULT, false)\n"
-        "          }\n"
-        "          instance = null",
-    ),
-]
-
-MUSIC_SERVICE_PATCHES = [
-    (
-        "    //定时关闭\n"
-        "    SleepTimer.addCallback(object : SleepTimer.Callback {",
-        "    //记忆功能：若上次开启了定时关闭，本次启动自动恢复\n"
-        "    if (!SleepTimer.isTicking()) {\n"
-        "      val autoTimerDefault =\n"
-        "          SPUtil.getValue(this, SETTING_KEY.NAME, SETTING_KEY.TIMER_DEFAULT, false)\n"
-        "      val autoTimerDuration =\n"
-        "          SPUtil.getValue(this, SETTING_KEY.NAME, SETTING_KEY.TIMER_DURATION, -1)\n"
-        "      if (autoTimerDefault && autoTimerDuration > 0) {\n"
-        "        SleepTimer.toggleTimer(autoTimerDuration.toLong() * 1000)\n"
-        "      }\n"
-        "    }\n"
-        "\n"
-        "    //定时关闭\n"
-        "    SleepTimer.addCallback(object : SleepTimer.Callback {",
-    ),
-]
-
-
-def apply(path, replacements, name):
-    if not os.path.isfile(path):
-        print("[失败] 找不到文件: %s" % path)
+def replace_or_fail(filepath, old_anchor, new_block, file_desc):
+    full_path = os.path.join(ROOT, filepath)
+    if not os.path.exists(full_path):
+        print(f"❌ 找不到文件: {filepath}")
         sys.exit(1)
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
-    for idx, (old, new) in enumerate(replacements, 1):
-        if new in text:
-            print("  - %s 第%d处: 已包含改动，跳过" % (name, idx))
-            continue
-        cnt = text.count(old)
-        if cnt != 1:
-            print("[失败] %s 第%d处锚点匹配到 %d 次（应为 1 次）" % (name, idx, cnt))
-            print("       锚点片段: %r" % old[:90])
-            sys.exit(1)
-        text = text.replace(old, new)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
-    print("[完成] %s" % name)
+    with open(full_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    if old_anchor not in content:
+        print(f"❌ 在{file_desc}里没找到匹配的代码，官方源码可能已更新")
+        sys.exit(1)
+    # 先备份
+    shutil.copy2(full_path, full_path + '.bak')
+    new_content = content.replace(old_anchor, new_block, 1)
+    with open(full_path, 'w', encoding='utf-8') as f:
+        f.write(new_content)
+    print(f"✅ {file_desc} 补丁打成功")
 
+# 1. 修改 SleepTimer.kt
+sleep_timer_path = "app/src/main/java/remix/myplayer/util/sleeptimer/SleepTimer.kt"
+sleep_timer_old = '''    fun start(minutes: Int) {
+        stop()
+        mTimer = Object()
+        mStartMinute = minutes
+        mStartMillisecond = minutes * 60 * 1000L
+        mAlarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + mStartMillisecond,
+            mPendingIntent
+        )
+        mListenerSet.forEach {
+            it.onStart(mStartMinute)
+        }
+        Toast.makeText(mContext, mContext.getString(R.string.sleep_timer_will_stop_in_minutes, minutes), Toast.LENGTH_SHORT).show()
+    }'''
+sleep_timer_new = '''    fun start(minutes: Int, remember: Boolean = true) {
+        stop()
+        mTimer = Object()
+        mStartMinute = minutes
+        mStartMillisecond = minutes * 60 * 1000L
+        mAlarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + mStartMillisecond,
+            mPendingIntent
+        )
+        mListenerSet.forEach {
+            it.onStart(mStartMinute)
+        }
+        // 记忆功能：自动保存开启状态和时长
+        if (remember) {
+            SPUtil.putValue(mContext, SPUtil.TIMER_DEFAULT, true)
+            SPUtil.putValue(mContext, SPUtil.TIMER_DURATION, minutes)
+        }
+        Toast.makeText(mContext, mContext.getString(R.string.sleep_timer_will_stop_in_minutes, minutes), Toast.LENGTH_SHORT).show()
+    }'''
+replace_or_fail(sleep_timer_path, sleep_timer_old, sleep_timer_new, "SleepTimer.kt 启动定时")
 
-def main():
-    print("正在为 APlayer 打入「定时关闭记忆功能」...")
-    apply(SLEEP_TIMER, SLEEP_TIMER_PATCHES, "SleepTimer.kt")
-    apply(MUSIC_SERVICE, MUSIC_SERVICE_PATCHES, "MusicService.kt")
-    print("补丁应用完成。接下来可执行 ./gradlew app:assembleCiRelease 构建 APK。")
+# 修改取消方法：取消时清除记忆
+sleep_timer_cancel_old = '''    fun cancel() {
+        mAlarmManager.cancel(mPendingIntent)
+        mTimer = null
+        mStartMinute = 0
+        mStartMillisecond = 0
+        mListenerSet.forEach {
+            it.onCancel()
+        }
+    }'''
+sleep_timer_cancel_new = '''    fun cancel(clearMemory: Boolean = true) {
+        mAlarmManager.cancel(mPendingIntent)
+        mTimer = null
+        mStartMinute = 0
+        mStartMillisecond = 0
+        mListenerSet.forEach {
+            it.onCancel()
+        }
+        // 记忆功能：手动取消时清除记忆，下次启动不自动开启
+        if (clearMemory) {
+            SPUtil.putValue(mContext, SPUtil.TIMER_DEFAULT, false)
+        }
+    }'''
+replace_or_fail(sleep_timer_path, sleep_timer_cancel_old, sleep_timer_cancel_new, "SleepTimer.kt 取消定时")
 
+# 2. 修改 MusicService.kt，onCreate时自动恢复定时
+music_service_path = "app/src/main/java/remix/myplayer/service/MusicService.kt"
+service_oncreate_old = '''        mMediaSession = MediaSessionCompat(this, "com.remix.myplayer.service.MusicService")
+        mMediaSession?.setCallback(mMediaSessionCallback)
+        initAsync()
+        isRunning = true
+        val service = Intent(this, MusicService::class.java)
+        startForeground(NOTIFICATION_ID, NotificationUtil.createNotify(this, service))
+    }'''
+service_oncreate_new = '''        mMediaSession = MediaSessionCompat(this, "com.remix.myplayer.service.MusicService")
+        mMediaSession?.setCallback(mMediaSessionCallback)
+        initAsync()
+        isRunning = true
+        val service = Intent(this, MusicService::class.java)
+        startForeground(NOTIFICATION_ID, NotificationUtil.createNotify(this, service))
+        // 定时记忆：服务启动后延迟2秒自动恢复上次的定时
+        Handler(Looper.getMainLooper()).postDelayed({
+            val isDefault = SPUtil.getValue(this, SPUtil.TIMER_DEFAULT, false) as Boolean
+            if (isDefault) {
+                val duration = SPUtil.getValue(this, SPUtil.TIMER_DURATION, 30) as Int
+                if (duration > 0) {
+                    SleepTimer.instance.start(duration, remember = false)
+                }
+            }
+        }, 2000)
+    }'''
+replace_or_fail(music_service_path, service_oncreate_old, service_oncreate_new, "MusicService.kt 启动恢复定时")
 
-if __name__ == "__main__":
-    main()
+print("🎉 所有补丁已全部打成功！")
