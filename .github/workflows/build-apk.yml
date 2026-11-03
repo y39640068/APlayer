@@ -9,24 +9,21 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      # 第一步：完全清空工作目录，避免默认拉取你fork仓库带来的子模块问题
-      - name: 1. 准备工作目录
+      - name: 1. 清空工作目录
         run: |
           rm -rf * .* 2>/dev/null || true
-          ls -la
+          pwd && ls -la
 
-      # 第二步：从国内GitCode镜像拉取完整源码（包含所有子模块，无需任何权限）
       - name: 2. 拉取完整源码（含全部子模块）
         run: |
           git clone https://gitcode.com/gh_mirrors/apla/APlayer.git . --recurse-submodules
+          echo "源码拉取完成，文件列表："
           ls -la
-          echo "源码拉取完成，开始准备补丁"
 
-      # 第三步：直接在构建过程中生成补丁脚本，不需要你提前上传任何文件
-      - name: 3. 生成并打定时记忆补丁
+      - name: 3. 生成补丁脚本并应用
         run: |
           mkdir -p tools
-          cat > tools/apply_memory_patch.py << 'EOF'
+          cat > tools/apply_memory_patch.py << 'PYEOF'
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, sys, shutil
@@ -35,21 +32,21 @@ ROOT = os.getcwd()
 def replace_or_fail(filepath, old_anchor, new_block, desc):
     full_path = os.path.join(ROOT, filepath)
     if not os.path.exists(full_path):
-        print(f"❌ 找不到文件: {filepath}")
+        print(f"[ERROR] 找不到文件: {filepath}")
         sys.exit(1)
     with open(full_path, 'r', encoding='utf-8') as f:
         content = f.read()
     if old_anchor not in content:
-        print(f"❌ {desc} 代码匹配失败")
+        print(f"[ERROR] {desc} 代码匹配失败")
         sys.exit(1)
     shutil.copy2(full_path, full_path + '.bak')
     with open(full_path, 'w', encoding='utf-8') as f:
         f.write(content.replace(old_anchor, new_block, 1))
-    print(f"✅ {desc} 补丁成功")
+    print(f"[OK] {desc} 补丁应用成功")
 
-# 修改SleepTimer：开启定时自动记忆，取消自动清除
-sleep_timer_path = "app/src/main/java/remix/myplayer/util/sleeptimer/SleepTimer.kt"
-sleep_start_old = '''    fun start(minutes: Int) {
+# 1. 修改SleepTimer启动方法：自动记忆时长
+sleep_timer = "app/src/main/java/remix/myplayer/util/sleeptimer/SleepTimer.kt"
+old_start = '''    fun start(minutes: Int) {
         stop()
         mTimer = Object()
         mStartMinute = minutes
@@ -64,7 +61,7 @@ sleep_start_old = '''    fun start(minutes: Int) {
         }
         Toast.makeText(mContext, mContext.getString(R.string.sleep_timer_will_stop_in_minutes, minutes), Toast.LENGTH_SHORT).show()
     }'''
-sleep_start_new = '''    fun start(minutes: Int, remember: Boolean = true) {
+new_start = '''    fun start(minutes: Int, remember: Boolean = true) {
         stop()
         mTimer = Object()
         mStartMinute = minutes
@@ -83,9 +80,10 @@ sleep_start_new = '''    fun start(minutes: Int, remember: Boolean = true) {
         }
         Toast.makeText(mContext, mContext.getString(R.string.sleep_timer_will_stop_in_minutes, minutes), Toast.LENGTH_SHORT).show()
     }'''
-replace_or_fail(sleep_timer_path, sleep_start_old, sleep_start_new, "SleepTimer启动定时")
+replace_or_fail(sleep_timer, old_start, new_start, "SleepTimer-启动记忆")
 
-sleep_cancel_old = '''    fun cancel() {
+# 2. 修改SleepTimer取消方法：清除记忆
+old_cancel = '''    fun cancel() {
         mAlarmManager.cancel(mPendingIntent)
         mTimer = null
         mStartMinute = 0
@@ -94,7 +92,7 @@ sleep_cancel_old = '''    fun cancel() {
             it.onCancel()
         }
     }'''
-sleep_cancel_new = '''    fun cancel(clearMemory: Boolean = true) {
+new_cancel = '''    fun cancel(clearMemory: Boolean = true) {
         mAlarmManager.cancel(mPendingIntent)
         mTimer = null
         mStartMinute = 0
@@ -106,45 +104,45 @@ sleep_cancel_new = '''    fun cancel(clearMemory: Boolean = true) {
             SPUtil.putValue(mContext, SPUtil.TIMER_DEFAULT, false)
         }
     }'''
-replace_or_fail(sleep_timer_path, sleep_cancel_old, sleep_cancel_new, "SleepTimer取消定时")
+replace_or_fail(sleep_timer, old_cancel, new_cancel, "SleepTimer-取消清除记忆")
 
-# 修改MusicService：启动时自动恢复定时
-service_path = "app/src/main/java/remix/myplayer/service/MusicService.kt"
-import_line_old = '''import android.os.IBinder'''
-import_line_new = '''import android.os.IBinder
+# 3. 修改MusicService：添加导入
+service = "app/src/main/java/remix/myplayer/service/MusicService.kt"
+old_import = '''import android.os.IBinder'''
+new_import = '''import android.os.IBinder
 import android.os.Handler
 import android.os.Looper'''
-replace_or_fail(service_path, import_line_old, import_line_new, "MusicService导入Handler")
+replace_or_fail(service, old_import, new_import, "MusicService-导入Handler")
 
-service_oncreate_old = '''        val service = Intent(this, MusicService::class.java)
+# 4. 修改MusicService onCreate：启动时自动恢复定时
+old_oncreate = '''        val service = Intent(this, MusicService::class.java)
         startForeground(NOTIFICATION_ID, NotificationUtil.createNotify(this, service))
     }'''
-service_oncreate_new = '''        val service = Intent(this, MusicService::class.java)
+new_oncreate = '''        val service = Intent(this, MusicService::class.java)
         startForeground(NOTIFICATION_ID, NotificationUtil.createNotify(this, service))
-        // 启动2秒后自动恢复上次定时
         Handler(Looper.getMainLooper()).postDelayed({
-            val isDefault = SPUtil.getValue(this, SPUtil.TIMER_DEFAULT, false) as Boolean
-            if (isDefault) {
-                val duration = SPUtil.getValue(this, SPUtil.TIMER_DURATION, 30) as Int
-                if (duration > 0) {
-                    SleepTimer.instance.start(duration, remember = false)
+            val isTimerOn = SPUtil.getValue(this, SPUtil.TIMER_DEFAULT, false) as Boolean
+            if (isTimerOn) {
+                val lastDuration = SPUtil.getValue(this, SPUtil.TIMER_DURATION, 30) as Int
+                if (lastDuration > 0) {
+                    SleepTimer.instance.start(lastDuration, remember = false)
                 }
             }
         }, 2000)
     }'''
-replace_or_fail(service_path, service_oncreate_old, service_oncreate_new, "MusicService启动恢复定时")
+replace_or_fail(service, old_oncreate, new_oncreate, "MusicService-自动恢复定时")
 
-print("🎉 定时记忆功能补丁全部打成功！")
-EOF
+print("🎉 所有定时记忆补丁已成功应用！")
+PYEOF
           python3 tools/apply_memory_patch.py
 
-      - name: 4. 设置 JDK 17 编译环境
+      - name: 4. 配置JDK 17环境
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 5. 缓存依赖加速构建
+      - name: 5. 缓存Gradle依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -154,7 +152,7 @@ EOF
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: 6. 开始编译Debug版APK（可直接安装）
+      - name: 6. 编译Debug版APK
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
@@ -163,10 +161,10 @@ EOF
         run: |
           mkdir -p apk-output
           find app/build/outputs/apk -name "*.apk" -type f -exec cp {} apk-output/ \;
-          echo "编译完成，APK列表："
-          ls -la apk-output/
+          echo "编译完成，APK文件："
+          ls -lh apk-output/
 
-      - name: 8. 上传APK到下载区
+      - name: 8. 上传APK供下载
         uses: actions/upload-artifact@v4
         with:
           name: APlayer-定时记忆版-APK
