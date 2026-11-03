@@ -9,19 +9,32 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 1. 拉取全部源码（自动带子模块）
+      # 第一步：只拉主仓库，绝对不拉子模块
+      - name: 1. 拉取主仓库源码
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
 
-      - name: 2. 设置 JDK 17
+      # 第二步：第一时间把子模块地址替换成公开地址，替换完再拉
+      - name: 2. 修复子模块地址
+        run: |
+          # 把作者私人账号的地址替换为他公开的项目组织地址
+          sed -i 's|https://github.com/y39640068/media.git|https://github.com/rRemix/media.git|g' .gitmodules
+          sed -i 's|https://github.com/y39640068/taglib.git|https://github.com/rRemix/taglib.git|g' .gitmodules
+          # 显示修改后的.gitmodules给你确认
+          cat .gitmodules
+          # 同步配置，再拉取子模块
+          git submodule sync
+          git submodule update --init --recursive
+
+      - name: 3. 设置 JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 3. 缓存Gradle依赖，加速构建
+      - name: 4. 缓存Gradle依赖
         uses: actions/cache@v4
         with:
           path: |
@@ -31,22 +44,22 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: 4. 自动打定时记忆功能补丁
+      - name: 5. 打定时记忆功能补丁
         run: |
           python3 tools/apply_memory_patch.py
 
-      - name: 5. 编译Debug版APK（无需签名，直接安装）
+      - name: 6. 编译可直接安装的Debug版APK
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: 6. 收集APK产物
+      - name: 7. 收集APK
         run: |
           mkdir -p apk-output
           find app/build/outputs/apk -name "*.apk" -type f -exec cp {} apk-output/ \;
           ls -la apk-output/
 
-      - name: 7. 上传APK供下载
+      - name: 8. 上传APK下载
         uses: actions/upload-artifact@v4
         with:
           name: APlayer-定时记忆版-APK
