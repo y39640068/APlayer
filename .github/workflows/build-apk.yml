@@ -5,22 +5,23 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
+# 全局禁用默认的checkout行为，避免自动拉取fork仓库
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: 1. 清空工作目录
+      - name: 1. 从国内GitCode镜像拉取完整源码（含全部子模块，不需要任何权限）
         run: |
           rm -rf * .* 2>/dev/null || true
-          pwd && ls -la
-
-      - name: 2. 拉取完整源码（含全部子模块）
-        run: |
           git clone https://gitcode.com/gh_mirrors/apla/APlayer.git . --recurse-submodules
-          echo "源码拉取完成，文件列表："
+          echo "✅ 源码拉取完成，文件列表："
           ls -la
 
-      - name: 3. 生成补丁脚本并应用
+      - name: 2. 生成定时记忆补丁并自动打补丁
         run: |
           mkdir -p tools
           cat > tools/apply_memory_patch.py << 'PYEOF'
@@ -44,7 +45,7 @@ def replace_or_fail(filepath, old_anchor, new_block, desc):
         f.write(content.replace(old_anchor, new_block, 1))
     print(f"[OK] {desc} 补丁应用成功")
 
-# 1. 修改SleepTimer启动方法：自动记忆时长
+# 修改SleepTimer启动：自动记忆
 sleep_timer = "app/src/main/java/remix/myplayer/util/sleeptimer/SleepTimer.kt"
 old_start = '''    fun start(minutes: Int) {
         stop()
@@ -80,9 +81,9 @@ new_start = '''    fun start(minutes: Int, remember: Boolean = true) {
         }
         Toast.makeText(mContext, mContext.getString(R.string.sleep_timer_will_stop_in_minutes, minutes), Toast.LENGTH_SHORT).show()
     }'''
-replace_or_fail(sleep_timer, old_start, new_start, "SleepTimer-启动记忆")
+replace_or_fail(sleep_timer, old_start, new_start, "SleepTimer启动记忆")
 
-# 2. 修改SleepTimer取消方法：清除记忆
+# 修改SleepTimer取消：清除记忆
 old_cancel = '''    fun cancel() {
         mAlarmManager.cancel(mPendingIntent)
         mTimer = null
@@ -104,17 +105,17 @@ new_cancel = '''    fun cancel(clearMemory: Boolean = true) {
             SPUtil.putValue(mContext, SPUtil.TIMER_DEFAULT, false)
         }
     }'''
-replace_or_fail(sleep_timer, old_cancel, new_cancel, "SleepTimer-取消清除记忆")
+replace_or_fail(sleep_timer, old_cancel, new_cancel, "SleepTimer取消清除")
 
-# 3. 修改MusicService：添加导入
+# 添加Handler导入
 service = "app/src/main/java/remix/myplayer/service/MusicService.kt"
 old_import = '''import android.os.IBinder'''
 new_import = '''import android.os.IBinder
 import android.os.Handler
 import android.os.Looper'''
-replace_or_fail(service, old_import, new_import, "MusicService-导入Handler")
+replace_or_fail(service, old_import, new_import, "MusicService导入依赖")
 
-# 4. 修改MusicService onCreate：启动时自动恢复定时
+# 启动自动恢复定时
 old_oncreate = '''        val service = Intent(this, MusicService::class.java)
         startForeground(NOTIFICATION_ID, NotificationUtil.createNotify(this, service))
     }'''
@@ -130,19 +131,19 @@ new_oncreate = '''        val service = Intent(this, MusicService::class.java)
             }
         }, 2000)
     }'''
-replace_or_fail(service, old_oncreate, new_oncreate, "MusicService-自动恢复定时")
+replace_or_fail(service, old_oncreate, new_oncreate, "MusicService自动恢复")
 
-print("🎉 所有定时记忆补丁已成功应用！")
+print("🎉 定时记忆功能补丁全部应用成功！")
 PYEOF
           python3 tools/apply_memory_patch.py
 
-      - name: 4. 配置JDK 17环境
+      - name: 3. 配置JDK 17编译环境
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 5. 缓存Gradle依赖
+      - name: 4. 缓存Gradle依赖加速
         uses: actions/cache@v4
         with:
           path: |
@@ -152,19 +153,19 @@ PYEOF
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: 6. 编译Debug版APK
+      - name: 5. 开始编译可直接安装的Debug版APK
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: 7. 收集APK产物
+      - name: 6. 收集编译好的APK
         run: |
           mkdir -p apk-output
           find app/build/outputs/apk -name "*.apk" -type f -exec cp {} apk-output/ \;
-          echo "编译完成，APK文件："
+          echo "✅ 编译完成，APK文件："
           ls -lh apk-output/
 
-      - name: 8. 上传APK供下载
+      - name: 7. 上传APK到下载区
         uses: actions/upload-artifact@v4
         with:
           name: APlayer-定时记忆版-APK
